@@ -189,20 +189,21 @@ jobs:
 
           echo "Workflow vẫn tồn tại"
 
-      # 12. Dọn file rác
+      # 12. Dọn file rác trong repository
       - name: Dọn file rác trong repository
         run: |
+          # Xóa thư mục __MACOSX, bỏ qua .git và .github
           find . \
-            -path "./.git" -prune -o \
-            -path "./.github" -prune -o \
-            -type d -name "__MACOSX" \
-            -prune -exec rm -rf {} +
+            \( -path "./.git" -o -path "./.github" \) -prune -o \
+            -type d -name "__MACOSX" -exec rm -rf {} +
 
+          # Xóa file rác, bỏ qua .git và .github
           find . \
-            -path "./.git" -prune -o \
-            -path "./.github" -prune -o \
+            \( -path "./.git" -o -path "./.github" \) -prune -o \
             -type f \( -name ".DS_Store" -o -name "Thumbs.db" \) \
-            -delete
+            -exec rm -f {} +
+
+          echo "Đã dọn file rác thành công"
 
       # 13. Xóa ZIP
       - name: Xóa ZIP sau khi giải nén
