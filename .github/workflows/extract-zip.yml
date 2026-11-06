@@ -6,7 +6,7 @@ on:
       zip_file:
         description: 'Tên file ZIP cần giải nén'
         required: true
-        default: 'Qusin.zip'
+        default: 'Qusin-Android-Source.zip'
 
 permissions:
   contents: write
@@ -14,176 +14,247 @@ permissions:
 jobs:
   replace-project:
     runs-on: ubuntu-latest
+
     steps:
+      # 1. Checkout repository và tải dữ liệu Git LFS thật
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          lfs: true
 
+      # 2. Kiểm tra ZIP
       - name: Kiểm tra ZIP tồn tại
+        env:
+          ZIP_FILE: ${{ github.event.inputs.zip_file }}
         run: |
-          ZIP_FILE="${{ github.event.inputs.zip_file }}"
           if [ ! -f "$ZIP_FILE" ]; then
             echo "::error::Không tìm thấy file ZIP: $ZIP_FILE"
             exit 1
           fi
-          echo "Tìm thấy ZIP: $ZIP_FILE"
 
-      - name: Kiểm tra workflow tồn tại trước khi xử lý
+          echo "Thông tin file:"
+          ls -lh "$ZIP_FILE"
+          file "$ZIP_FILE"
+
+      # 3. Kiểm tra workflow
+      - name: Kiểm tra workflow tồn tại
         run: |
           if [ ! -f ".github/workflows/extract-zip.yml" ]; then
-            echo "::error::Workflow extract-zip.yml không tồn tại trước khi xử lý"
+            echo "::error::Không tìm thấy extract-zip.yml"
             exit 1
           fi
-          echo "Workflow OK trước khi xử lý"
 
+          echo "Workflow tồn tại"
+
+      # 4. Backup workflow
       - name: Backup workflow
         run: |
           mkdir -p /tmp/workflow-backup/.github/workflows
-          cp -f .github/workflows/extract-zip.yml /tmp/workflow-backup/.github/workflows/extract-zip.yml
-          echo "Đã backup workflow vào /tmp/workflow-backup"
 
-      - name: Kiểm tra & giải nén ZIP vào thư mục tạm
+          cp -f \
+            .github/workflows/extract-zip.yml \
+            /tmp/workflow-backup/.github/workflows/extract-zip.yml
+
+      # 5. Kiểm tra ZIP và giải nén
+      - name: Kiểm tra và giải nén ZIP
+        env:
+          ZIP_FILE: ${{ github.event.inputs.zip_file }}
         run: |
-          ZIP_FILE="${{ github.event.inputs.zip_file }}"
           EXTRACT_DIR="/tmp/zip-extract"
+
           rm -rf "$EXTRACT_DIR"
           mkdir -p "$EXTRACT_DIR"
 
-          if ! unzip -tq "$ZIP_FILE" > /dev/null 2>&1; then
-            echo "::error::File ZIP bị hỏng hoặc không hợp lệ: $ZIP_FILE"
+          # Kiểm tra file có phải ZIP thật không
+          if ! file "$ZIP_FILE" | grep -qi "zip archive"; then
+            echo "::error::File tải về không phải ZIP thật. Có thể Git LFS chưa tải file."
+            echo "Nội dung file:"
+            head -c 300 "$ZIP_FILE" || true
             exit 1
           fi
 
+          # Kiểm tra cấu trúc ZIP
+          if ! unzip -tq "$ZIP_FILE"; then
+            echo "::error::File ZIP bị hỏng hoặc không hợp lệ"
+            exit 1
+          fi
+
+          # Giải nén
           unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
-          if [ $? -ne 0 ]; then
-            echo "::error::Giải nén ZIP thất bại"
-            exit 1
-          fi
-          echo "Giải nén thành công vào $EXTRACT_DIR"
 
-      - name: Dọn file rác trong bản giải nén
+          echo "Giải nén thành công"
+
+      # 6. Dọn file rác
+      - name: Dọn file rác
         run: |
           EXTRACT_DIR="/tmp/zip-extract"
-          find "$EXTRACT_DIR" -type d -name "__MACOSX" -exec rm -rf {} + 2>/dev/null || true
-          find "$EXTRACT_DIR" -type f -name ".DS_Store" -delete 2>/dev/null || true
-          find "$EXTRACT_DIR" -type f -name "Thumbs.db" -delete 2>/dev/null || true
-          echo "Đã dọn file rác"
 
-      - name: Xác định thư mục nguồn thực tế (xử lý ZIP kiểu 1 và kiểu 2)
+          find "$EXTRACT_DIR" \
+            -type d -name "__MACOSX" \
+            -prune -exec rm -rf {} +
+
+          find "$EXTRACT_DIR" \
+            -type f \( -name ".DS_Store" -o -name "Thumbs.db" \) \
+            -delete
+
+      # 7. Xác định thư mục source
+      - name: Xác định thư mục nguồn
         id: source
         run: |
           EXTRACT_DIR="/tmp/zip-extract"
 
-          # Đếm số item ở cấp gốc (không tính rác đã xóa)
-          ITEMS=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+          ITEMS=$(find "$EXTRACT_DIR" \
+            -mindepth 1 -maxdepth 1 | wc -l)
 
-          if [ "$ITEMS" -eq 1 ]; then
-            ONLY_ITEM=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1)
-            if [ -d "$ONLY_ITEM" ]; then
-              echo "Phát hiện ZIP kiểu 2 (1 thư mục gốc): $ONLY_ITEM"
-              echo "src_dir=$ONLY_ITEM" >> "$GITHUB_OUTPUT"
-            else
-              echo "Phát hiện ZIP kiểu 1 (file lẻ ở gốc)"
-              echo "src_dir=$EXTRACT_DIR" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "Phát hiện ZIP kiểu 1 (nhiều item ở gốc)"
-            echo "src_dir=$EXTRACT_DIR" >> "$GITHUB_OUTPUT"
+          if [ "$ITEMS" -eq 0 ]; then
+            echo "::error::ZIP không chứa dữ liệu"
+            exit 1
           fi
 
-      - name: Xóa toàn bộ project cũ (giữ .git và .github)
+          if [ "$ITEMS" -eq 1 ]; then
+            ONLY_ITEM=$(find "$EXTRACT_DIR" \
+              -mindepth 1 -maxdepth 1)
+
+            if [ -d "$ONLY_ITEM" ]; then
+              SRC_DIR="$ONLY_ITEM"
+            else
+              SRC_DIR="$EXTRACT_DIR"
+            fi
+          else
+            SRC_DIR="$EXTRACT_DIR"
+          fi
+
+          echo "src_dir=$SRC_DIR" >> "$GITHUB_OUTPUT"
+          echo "Thư mục source: $SRC_DIR"
+
+      # 8. Xóa project cũ nhưng giữ file hệ thống
+      - name: Xóa project cũ
+        env:
+          ZIP_FILE: ${{ github.event.inputs.zip_file }}
         run: |
-          ZIP_FILE="${{ github.event.inputs.zip_file }}"
-          shopt -s extglob dotglob
+          shopt -s dotglob nullglob
+
           for item in *; do
             case "$item" in
-              .git|.github|"$ZIP_FILE")
+              .git|.github|.gitattributes|"$ZIP_FILE")
+                echo "Giữ lại: $item"
                 ;;
               *)
+                echo "Xóa: $item"
                 rm -rf -- "$item"
                 ;;
             esac
           done
-          echo "Đã xóa project cũ (giữ .git, .github, ZIP hiện tại)"
 
-      - name: Copy project mới vào repository
+      # 9. Copy source mới
+      - name: Copy project mới
+        env:
+          SRC_DIR: ${{ steps.source.outputs.src_dir }}
         run: |
-          SRC_DIR="${{ steps.source.outputs.src_dir }}"
-          shopt -s dotglob
+          shopt -s dotglob nullglob
+
           for item in "$SRC_DIR"/*; do
             base=$(basename "$item")
-            # Không cho ZIP mới ghi đè trực tiếp .github ở đây,
-            # bước restore workflow phía sau sẽ đảm bảo workflow chính an toàn
+
+            # Không ghi đè cấu hình Git và workflow
+            case "$base" in
+              .git|.github|.gitattributes)
+                echo "Bỏ qua file hệ thống: $base"
+                continue
+                ;;
+            esac
+
             cp -rf "$item" "./$base"
           done
-          echo "Đã copy project mới vào repository"
 
+          echo "Đã copy source mới"
+
+      # 10. Khôi phục workflow
       - name: Khôi phục workflow
         run: |
           mkdir -p .github/workflows
-          cp -f /tmp/workflow-backup/.github/workflows/extract-zip.yml .github/workflows/extract-zip.yml
-          echo "Đã khôi phục workflow"
 
-      - name: Kiểm tra workflow còn tồn tại sau khi xử lý
+          cp -f \
+            /tmp/workflow-backup/.github/workflows/extract-zip.yml \
+            .github/workflows/extract-zip.yml
+
+      # 11. Kiểm tra workflow
+      - name: Kiểm tra workflow sau xử lý
         run: |
-          if [ ! -f ".github/workflows/extract-zip.yml" ]; then
-            echo "::error::Workflow extract-zip.yml bị mất sau khi xử lý!"
+          test -f .github/workflows/extract-zip.yml || {
+            echo "::error::Workflow bị mất"
             exit 1
-          fi
-          echo "Workflow OK sau khi xử lý"
+          }
 
-      - name: Dọn file rác còn sót ở repo gốc
-        run: |
-          find . -maxdepth 2 -type d -name "__MACOSX" -exec rm -rf {} + 2>/dev/null || true
-          find . -maxdepth 2 -type f -name ".DS_Store" -delete 2>/dev/null || true
-          echo "Đã dọn file rác ở repo"
+          echo "Workflow vẫn tồn tại"
 
-      - name: Xóa ZIP sau khi xử lý
+      # 12. Dọn file rác
+      - name: Dọn file rác trong repository
         run: |
-          ZIP_FILE="${{ github.event.inputs.zip_file }}"
-          rm -f "$ZIP_FILE"
+          find . \
+            -path "./.git" -prune -o \
+            -path "./.github" -prune -o \
+            -type d -name "__MACOSX" \
+            -prune -exec rm -rf {} +
+
+          find . \
+            -path "./.git" -prune -o \
+            -path "./.github" -prune -o \
+            -type f \( -name ".DS_Store" -o -name "Thumbs.db" \) \
+            -delete
+
+      # 13. Xóa ZIP
+      - name: Xóa ZIP sau khi giải nén
+        env:
+          ZIP_FILE: ${{ github.event.inputs.zip_file }}
+        run: |
+          rm -f -- "$ZIP_FILE"
+
           echo "Đã xóa $ZIP_FILE"
 
+      # 14. Cấu hình Git
       - name: Cấu hình Git
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # 15. Commit source mới
       - name: Commit thay đổi
         id: commit
         run: |
           git add -A
+
           if git diff --cached --quiet; then
-            echo "Không có thay đổi để commit"
+            echo "Không có thay đổi"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "Replace project with uploaded ZIP"
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # 16. Push source mới
       - name: Push thay đổi
         if: steps.commit.outputs.changed == 'true'
         run: |
-          git push
-          if [ $? -ne 0 ]; then
-            echo "::error::Push thất bại"
-            exit 1
-          fi
-          echo "Push thành công"
+          git push origin HEAD:${GITHUB_REF_NAME}
 
+          echo "Đã push source mới thành công"
+
+      # 17. Xóa workflow sau khi hoàn tất
       - name: Tự xóa workflow sau khi hoàn tất
         run: |
           rm -f .github/workflows/extract-zip.yml
+
           git add -A
+
           if git diff --cached --quiet; then
-            echo "Không có gì để commit khi xóa workflow"
+            echo "Không có thay đổi khi xóa workflow"
           else
             git commit -m "Remove extract-zip workflow after use"
-            git push
-            if [ $? -ne 0 ]; then
-              echo "::error::Push xóa workflow thất bại"
-              exit 1
-            fi
+
+            git push origin HEAD:${GITHUB_REF_NAME}
+
             echo "Đã xóa workflow khỏi repository"
           fi
